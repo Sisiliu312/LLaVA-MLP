@@ -23,6 +23,7 @@ wandb
 output
 
 checkpoints
+attention_maps
 ckpts*
 
 .ipynb_checkpoints
