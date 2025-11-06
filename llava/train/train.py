@@ -171,7 +171,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'layer_router', 'ca']
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -190,7 +190,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
 
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
-        keys_to_match = ['mm_projector']
+        keys_to_match = ['mm_projector', 'layer_router', 'ca']
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 
@@ -875,7 +875,20 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
             # print(model)
-            # print("-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+            print("-=-=-=-=-=-from_pretrained-=-=-=-=-=-=-=-")
+            print(f"🔍 from_pretrained 后:")
+            print(f"  hasattr(model.model, 'ca'): {hasattr(model.model, 'ca')}")
+            print(f"  hasattr(model.model, 'layer_router'): {hasattr(model.model, 'layer_router')}")
+
+            if hasattr(model.model, 'ca'):
+                print(f"  model.model.ca: {model.model.ca}")
+                if hasattr(model.model.ca, 'W_q'):
+                    print(f"  model.model.ca.W_q.weight.shape: {model.model.ca.W_q.weight.shape}")
+
+            if hasattr(model.model, 'layer_router'):
+                print(f"  model.model.layer_router: {model.model.layer_router}")
+                if hasattr(model.model.layer_router, 'w1'):
+                    print(f"  model.model.layer_router.w1.weight.shape: {model.model.layer_router.w1.weight.shape}")
     else:
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
@@ -885,62 +898,6 @@ def train(attn_implementation=None):
             **bnb_model_from_pretrained_args
         )
     model.config.use_cache = False
-
-    def fix_ca_after_loading(model):
-        """
-        在训练脚本中调用此函数，加载模型后立即修复
-        
-        使用方法：
-        model = LlavaLlamaForCausalLM.from_pretrained(...)
-        fix_ca_after_loading(model)  # ⭐ 添加这行
-        """
-        if hasattr(model, 'model') and hasattr(model.model, 'ca'):
-            cross_att = model.model.ca
-            with torch.no_grad():
-                nn.init.xavier_uniform_(cross_att.W_q.weight)
-                nn.init.xavier_uniform_(cross_att.W_k.weight)
-                nn.init.constant_(cross_att.W_q.bias, 0.0)
-                nn.init.constant_(cross_att.W_k.bias, 0.0)    
-                
-            print(f"✅ ca bias after fix")
-
-    fix_ca_after_loading(model)
-    
-
-    def fix_router_after_loading(model):
-        """
-        在训练脚本中调用此函数，加载模型后立即修复
-        
-        使用方法：
-        model = LlavaLlamaForCausalLM.from_pretrained(...)
-        fix_router_after_loading(model)  # ⭐ 添加这行
-        """
-        if hasattr(model, 'model') and hasattr(model.model, 'layer_router'):
-            router = model.model.layer_router
-            current_bias_std = router.w3.bias.std().item()
-            
-            print(f"🔍 Checking router bias std: {current_bias_std:.4f}")
-            
-            if current_bias_std < 0.5:  # 太小，说明被重置了
-                print("🔧 Re-initializing router bias...")
-                with torch.no_grad():
-                    uniform_indices = [3,8,13,18,23]
-                    router.w3.bias.fill_(-0.1)
-                    for idx in uniform_indices:
-                        router.w3.bias[idx] = 0.1
-                    
-                    nn.init.xavier_uniform_(router.w1.weight)
-                    nn.init.xavier_uniform_(router.w2.weight)
-                    nn.init.xavier_uniform_(router.w3.weight)
-                    nn.init.constant_(router.w1.bias, 0.0)
-                    nn.init.constant_(router.w2.bias, 0.0)
-                
-                print(f"✅ Router bias after fix: {router.w3.bias[:6].tolist()}")
-                print(f"   Top-5 bias indices: {torch.topk(router.w3.bias, 5).indices.tolist()}")
-            else:
-                print("✅ Router bias looks good, no fix needed")
-
-    fix_router_after_loading(model)
 
     if model_args.freeze_backbone:
         model.model.requires_grad_(False)
@@ -1070,9 +1027,25 @@ def train(attn_implementation=None):
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
 
-    for name, param in model.named_parameters():
-        print(f"{name} 的梯度：", param.grad)
-        print(f"{name} 的需要修改：", param.requires_grad)
+    # for name, param in model.named_parameters():
+    #     print(f"{name} 的梯度：", param.grad)
+    #     print(f"{name} 的需要修改：", param.requires_grad)
+    print("=" * 60)
+    print("🔍 训练配置:")
+    print(f"  lora_enable: {training_args.lora_enable}")
+    print(f"  tune_mm_mlp_adapter: {model_args.tune_mm_mlp_adapter}")
+    print("=" * 60)
+
+    # 检查模型结构
+    print("\n🔍 layer_router 结构:")
+    for name, module in model.get_model().layer_router.named_modules():
+        if name:
+            print(f"  {name}: {type(module).__name__}")
+
+    print("\n🔍 ca 结构:")
+    for name, module in model.get_model().ca.named_modules():
+        if name:
+            print(f"  {name}: {type(module).__name__}")
 
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,

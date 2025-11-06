@@ -97,6 +97,9 @@ class CrossAttention(nn.Module):
         
         # 初始化参数
         self._reset_parameters()
+        print('初始化时 self.W_q :', self.W_q.weight.norm().item())
+        print('初始化时 self.W_q :', self.W_q.weight.shape)
+        print('初始化时 self.W_q.bias :', self.W_k.bias.shape)
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.W_q.weight)
@@ -110,12 +113,14 @@ class CrossAttention(nn.Module):
         features: [batch, num_patches, feature_dim] 图像特征
         返回: [batch, num_patches] 注意力权重
         """
+        
+        print('fordward时 self.W_q mean:', self.W_q.weight.norm().item())
+        print('fordward时 self.W_q :', self.W_q.weight.shape)
+        print('fordward时 self.W_q.bias :', self.W_k.bias.shape)
 
         # 1. 线性变换
         Q = self.W_q(text)  # [batch, text_seq_len, feature_dim]
         K = self.W_k(features)  # [batch, num_patches, feature_dim]
-        # print('Q mean:', Q.mean(), 'std:', Q.std())
-        # print('K mean:', K.mean(), 'std:', K.std())
         # print(f"K min: {K.min()}, max: {K.max()}")
 
         # Q = Q.clamp(min=-50, max=50)
@@ -152,13 +157,13 @@ class LayerSelectionRouter(nn.Module):
     Router that selects top-5 layers from 24 vision tower layers.
     Initialized to uniformly select layers [1, 6, 11, 16, 21] (0-indexed: [0, 5, 10, 15, 20])
     """
-    def __init__(self, dim, num_layers, top_k):
-        super().__init__()
+    def __init__(self, dim, num_layers, top_router):
+        super(LayerSelectionRouter, self).__init__()
         self.num_layers = num_layers
-        self.top_k = 5
+        self.top_router = top_router
         self.dim = dim
 
-        print(f"Initializing LayerSelectionRouter with dim={self.dim}, num_layers={self.num_layers}, top_k={self.top_k}")
+        # print(f"Initializing LayerSelectionRouter with dim={self.dim}, num_layers={self.num_layers}, top_router={self.top_router}")
         
         # Router network with SiLU gating (matching diagram: W1, W2, W3)
         self.w1 = nn.Linear(dim, dim)
@@ -166,28 +171,32 @@ class LayerSelectionRouter(nn.Module):
         self.w3 = nn.Linear(dim, num_layers)
         
         # Initialize to favor uniform selection of [0, 5, 10, 15, 20]
-        self._initialize_uniform_selection()
-        print("初始化后 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
+        self._reset_parameters()
+        print('初始化时 self.w1 mean:', self.w1.weight.norm().item())
+        print('初始化时 self.w1 shape:', self.w1.weight.shape)
+        print("初始化时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
         
-    def _initialize_uniform_selection(self):
+    def _reset_parameters(self):
         """Initialize router to uniformly select layers [1, 6, 11, 16, 21] (0-indexed)"""
+        
+        checkpoint = torch.load('/hy-tmp/checkpoints/llava-v1.5-7b-pretrain/mm_projector.bin')
+        print("保存的参数:")
+        for key in checkpoint.keys():
+            print(f"  {key}: {checkpoint[key].shape}")
+
+
+        nn.init.xavier_uniform_(self.w1.weight)
+        nn.init.xavier_uniform_(self.w2.weight)
+        nn.init.xavier_uniform_(self.w3.weight)
+        nn.init.constant_(self.w1.bias, 0.0)
+        nn.init.constant_(self.w2.bias, 0.0)
+        nn.init.constant_(self.w3.bias, -0.1)
+        
         with torch.no_grad():
-            # Target layer indices (0-indexed for [1, 6, 11, 16, 21])
-            uniform_indices = [0, 5, 10, 15, 20]
-            
-            # Initialize W3 bias with large negative values
-            self.w3.bias.fill_(-10.0)
-            
-            # Set positive bias for desired layers
+            uniform_indices = [3, 8, 13, 18, 23]
             for idx in uniform_indices:
-                self.w3.bias[idx] = 10.0
-            
-            # Initialize weights to small values for stability
-            nn.init.xavier_uniform_(self.w1.weight)
-            nn.init.xavier_uniform_(self.w2.weight)
-            nn.init.xavier_uniform_(self.w3.weight)
-            nn.init.constant_(self.w1.bias, 0.0)
-            nn.init.constant_(self.w2.bias, 0.0)
+                self.w3.bias[idx] = 0.1
+                    
     
     def forward(self, text_features):
         """
@@ -196,9 +205,8 @@ class LayerSelectionRouter(nn.Module):
         
         Returns:
             layer_weights: Softmax weights for all layers [batch_size, num_layers]
-            selected_indices: Indices of top-k selected layers [batch_size, top_k]
+            selected_indices: Indices of top-k selected layers [batch_size, top_router]
         """
-        # Average pool over sequence length to get representation
         # [batch_size, text_len, dim] -> [batch_size, dim]
         pooled = text_features.mean(dim=1)
         # self.attention_pool = nn.Sequential(
@@ -206,25 +214,20 @@ class LayerSelectionRouter(nn.Module):
         #     nn.Softmax(dim=1)
         # )
         
-        # Apply gating mechanism (matching diagram architecture)
-        # W1 with SiLU
+        print('fordward时 self.w1 mean:', self.w1.weight.norm().item())
+        print('fordward时 self.w1 shape:', self.w1.weight.shape)
         h1 = F.silu(self.w1(pooled))
         
-        # W2 with SiLU  
         h2 = F.silu(self.w2(pooled))
         
-        # Element-wise multiplication (circle with dot in diagram)
         gated = h1 * h2
         
-        print("forward 前 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
-        # W3 to get layer logits
-        logits = self.w3(gated)  # [batch_size, num_layers]
+        print("forward时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
+        logits = self.w3(gated)
         
-        # Apply softmax to get layer selection probabilities
         layer_probs = F.softmax(logits, dim=-1)
 
-        # Select top-k layers
-        top_weights, top_indices = torch.topk(layer_probs, self.top_k, dim=-1)
+        top_weights, top_indices = torch.topk(layer_probs, self.top_router, dim=-1)
         top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
         
         return top_indices, top_weights, layer_probs
@@ -256,11 +259,18 @@ def build_cross_attn(config):
     return CrossAttention(text_dim=text_dim, feature_dim=feature_dim)
 
 def build_layer_router(config):
+    # print("=" * 60)
+    # print("🔍 build_layer_router 调试:")
+    # print(f"  hasattr(config, 'dim'): {hasattr(config, 'dim')}")
+    # print(f"  hasattr(config, 'num_layers'): {hasattr(config, 'num_layers')}")
+    # print(f"  hasattr(config, 'top_router'): {hasattr(config, 'top_router')}")
+    
     dim = config.dim if hasattr(config, 'dim') else 4096
     num_layers = config.num_layers if hasattr(config, 'num_layers') else 24
-    top_k = config.top_k if hasattr(config, 'top_k') else 5
-    if hasattr(config, 'top_k'):
-        print(f"Building LayerSelectionRouter with top_k={config.top_k}")
+    top_router = config.top_router if hasattr(config, 'top_router') else 5
     
+    print(f"  最终: dim={dim}, num_layers={num_layers}, top_router={top_router}")
+    print(f"  类型: dim={type(dim)}, num_layers={type(num_layers)}, top_router={type(top_router)}")
+    print("=" * 60)
     
-    return LayerSelectionRouter(dim=dim, num_layers=num_layers, top_k=top_k)
+    return LayerSelectionRouter(dim=dim, num_layers=num_layers, top_router=top_router)
