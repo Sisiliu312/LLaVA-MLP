@@ -97,9 +97,9 @@ class CrossAttention(nn.Module):
         
         # 初始化参数
         self._reset_parameters()
-        print('初始化时 self.W_q :', self.W_q.weight.norm().item())
-        print('初始化时 self.W_q :', self.W_q.weight.shape)
-        print('初始化时 self.W_q.bias :', self.W_k.bias.shape)
+        print("-=-=-=-=-=-初始化-=-=-=-=-=-=-=-")
+        print('[CA]self.W_q :', self.W_q.weight.shape)
+        print('[CA]self.W_q.bias :', self.W_k.bias.shape)
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.W_q.weight)
@@ -113,10 +113,10 @@ class CrossAttention(nn.Module):
         features: [batch, num_patches, feature_dim] 图像特征
         返回: [batch, num_patches] 注意力权重
         """
-        
-        print('fordward时 self.W_q mean:', self.W_q.weight.norm().item())
-        print('fordward时 self.W_q :', self.W_q.weight.shape)
-        print('fordward时 self.W_q.bias :', self.W_k.bias.shape)
+        # print("-=-=-=-=-=-fordward时-=-=-=-=-=-=-=-")
+        # print('fordward时 self.W_q mean:', self.W_q.weight.norm().item())
+        print('[CA]self.W_q :', self.W_q.weight.shape)
+        print('[CA]self.W_q.bias :', self.W_k.bias.shape)
 
         # 1. 线性变换
         Q = self.W_q(text)  # [batch, text_seq_len, feature_dim]
@@ -152,6 +152,120 @@ class CrossAttention(nn.Module):
 
         return attended
 
+# class LayerSelectionRouter(nn.Module):
+#     """
+#     Router that selects top-5 layers from 24 vision tower layers.
+#     Initialized to uniformly select layers [1, 6, 11, 16, 21] (0-indexed: [0, 5, 10, 15, 20])
+#     """
+#     def __init__(self, dim, num_layers, top_router):
+#         super(LayerSelectionRouter, self).__init__()
+#         self.num_layers = num_layers
+#         self.top_router = top_router
+#         self.dim = dim
+
+#         # print(f"Initializing LayerSelectionRouter with dim={self.dim}, num_layers={self.num_layers}, top_router={self.top_router}")
+        
+#         # Router network with SiLU gating (matching diagram: W1, W2, W3)
+#         self.w1 = nn.Linear(dim, dim)
+#         self.w2 = nn.Linear(dim, dim)
+#         self.w3 = nn.Linear(dim, num_layers)
+        
+#         # Initialize to favor uniform selection of [0, 5, 10, 15, 20]
+#         self._reset_parameters()
+#         # print('初始化时 self.w1 mean:', self.w1.weight.norm().item())
+#         print('初始化时 self.w1 shape:', self.w1.weight.shape)
+#         # print("初始化时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
+        
+#     def _reset_parameters(self):
+#         """Initialize router to uniformly select layers [1, 6, 11, 16, 21] (0-indexed)"""
+        
+#         # checkpoint = torch.load('/hy-tmp/checkpoints/llava-v1.5-7b-pretrain/mm_projector.bin')
+#         # print("保存的参数:")
+#         # for key in checkpoint.keys():
+#         #     print(f"  {key}: {checkpoint[key].shape}")
+
+#         nn.init.xavier_uniform_(self.w1.weight)
+#         nn.init.xavier_uniform_(self.w2.weight)
+#         nn.init.xavier_uniform_(self.w3.weight)
+#         nn.init.constant_(self.w1.bias, 0.0)
+#         nn.init.constant_(self.w2.bias, 0.0)
+#         nn.init.constant_(self.w3.bias, -0.1)
+        
+#         with torch.no_grad():
+#             uniform_indices = [3, 8, 13, 18, 23]
+#             for idx in uniform_indices:
+#                 self.w3.bias[idx] = 0.1
+                    
+    
+#     def forward(self, text_features):
+#         """
+#         Args:
+#             text_features: Text token features [batch_size, text_len, dim]
+        
+#         Returns:
+#             layer_weights: Softmax weights for all layers [batch_size, num_layers]
+#             selected_indices: Indices of top-k selected layers [batch_size, top_router]
+#         """
+#         # [batch_size, text_len, dim] -> [batch_size, dim]
+#         pooled = text_features.mean(dim=1)
+#         # self.attention_pool = nn.Sequential(
+#         #     nn.Linear(dim, 1),
+#         #     nn.Softmax(dim=1)
+#         # )
+        
+#         # print('fordward时 self.w1 mean:', self.w1.weight.norm().item())
+#         print('fordward时 self.w1 shape:', self.w1.weight.shape)
+#         h1 = F.silu(self.w1(pooled))
+        
+#         h2 = F.silu(self.w2(pooled))
+        
+#         gated = h1 * h2
+        
+#         # print("forward时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
+#         logits = self.w3(gated)
+        
+#         layer_probs = F.softmax(logits, dim=-1)
+
+
+#         top_weights, top_indices = torch.topk(layer_probs, self.top_router, dim=-1)
+
+#         top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+
+#         # 向量化投票: 统计哪些层被选择最多
+#         # batch_size, text_len, dim = text_features.shape
+#         # print("text_features shape:", text_features.shape)
+#         # h1 = F.silu(self.w1(text_features))
+#         # h2 = F.silu(self.w2(text_features))
+#         # print("h2 shape:", h2.shape)
+#         # gated = h1 * h2
+#         # # [batch_size, text_len, num_layers]
+#         # logits = self.w3(gated)  
+#         # layer_probs = F.softmax(logits, dim=-1)
+#         # print("layer_probs shape:", layer_probs.shape)
+#         # per_token_top = torch.topk(layer_probs, self.top_router, dim=-1)
+
+#         # layer_votes = torch.zeros(
+#         #     batch_size, 
+#         #     self.num_layers, 
+#         #     device=text_features.device,
+#         #     dtype=text_features.dtype
+#         # )
+        
+#         # for b in range(batch_size):
+#         #     layer_votes[b].scatter_add_(
+#         #         0,
+#         #         per_token_top.indices[b].flatten(),
+#         #         per_token_top.values[b].flatten()
+#         #     )
+
+#         # top_weights, top_indices = torch.topk(layer_votes, self.top_router, dim=-1)
+#         # print("top_weights shape:", top_weights.shape)
+        
+#         # top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+        
+#         return top_indices, top_weights, layer_probs
+
+
 class LayerSelectionRouter(nn.Module):
     """
     Router that selects top-5 layers from 24 vision tower layers.
@@ -162,75 +276,97 @@ class LayerSelectionRouter(nn.Module):
         self.num_layers = num_layers
         self.top_router = top_router
         self.dim = dim
-
-        # print(f"Initializing LayerSelectionRouter with dim={self.dim}, num_layers={self.num_layers}, top_router={self.top_router}")
         
-        # Router network with SiLU gating (matching diagram: W1, W2, W3)
-        self.w1 = nn.Linear(dim, dim)
-        self.w2 = nn.Linear(dim, dim)
-        self.w3 = nn.Linear(dim, num_layers)
+        # ✅ 简化的 Router 架构
+        self.router = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_layers)
+        )
         
-        # Initialize to favor uniform selection of [0, 5, 10, 15, 20]
+        # Initialize to favor uniform selection
         self._reset_parameters()
-        print('初始化时 self.w1 mean:', self.w1.weight.norm().item())
-        print('初始化时 self.w1 shape:', self.w1.weight.shape)
-        print("初始化时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
         
     def _reset_parameters(self):
         """Initialize router to uniformly select layers [1, 6, 11, 16, 21] (0-indexed)"""
+        for module in self.router.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
         
-        checkpoint = torch.load('/hy-tmp/checkpoints/llava-v1.5-7b-pretrain/mm_projector.bin')
-        print("保存的参数:")
-        for key in checkpoint.keys():
-            print(f"  {key}: {checkpoint[key].shape}")
-
-
-        nn.init.xavier_uniform_(self.w1.weight)
-        nn.init.xavier_uniform_(self.w2.weight)
-        nn.init.xavier_uniform_(self.w3.weight)
-        nn.init.constant_(self.w1.bias, 0.0)
-        nn.init.constant_(self.w2.bias, 0.0)
-        nn.init.constant_(self.w3.bias, -0.1)
-        
+        uniform_indices = [3, 8, 13, 18, 23]
         with torch.no_grad():
-            uniform_indices = [3, 8, 13, 18, 23]
             for idx in uniform_indices:
-                self.w3.bias[idx] = 0.1
-                    
+                self.router[-1].bias[idx] = 0.5
+
+        print(f"[Router]router[0].weight.shape: {self.router[0].weight.shape}")
+        print(f"[Router]router[2].weight.shape: {self.router[2].weight.shape}")
+        print(f"[Router]router[2].bias (前6项): {self.router[2].bias[:6].tolist()}")
+        print(f"[Router]router[2].bias (后6项): {self.router[2].bias[-6:].tolist()}")
     
     def forward(self, text_features):
-        """
-        Args:
-            text_features: Text token features [batch_size, text_len, dim]
+        batch_size, text_len, dim = text_features.shape
         
-        Returns:
-            layer_weights: Softmax weights for all layers [batch_size, num_layers]
-            selected_indices: Indices of top-k selected layers [batch_size, top_router]
-        """
-        # [batch_size, text_len, dim] -> [batch_size, dim]
-        pooled = text_features.mean(dim=1)
-        # self.attention_pool = nn.Sequential(
-        #     nn.Linear(dim, 1),
-        #     nn.Softmax(dim=1)
-        # )
-        
-        print('fordward时 self.w1 mean:', self.w1.weight.norm().item())
-        print('fordward时 self.w1 shape:', self.w1.weight.shape)
-        h1 = F.silu(self.w1(pooled))
-        
-        h2 = F.silu(self.w2(pooled))
-        
-        gated = h1 * h2
-        
-        print("forward时 w3.bias (前6 + 后1):", self.w3.bias.tolist()[:6] + ["..."] + [self.w3.bias.tolist()[-1]])
-        logits = self.w3(gated)
-        
-        layer_probs = F.softmax(logits, dim=-1)
+        # 每个 token 都预测
+        logits = self.router(text_features)  # [batch_size, text_len, num_layers]
+        print(f"[Router]router[0].weight.shape: {self.router[0].weight.shape}")
+        print(f"[Router]router[2].weight.shape: {self.router[2].weight.shape}")
+        print(f"[Router]router[2].bias (前6项): {self.router[2].bias[:6].tolist()}")
+        print(f"[Router]router[2].bias (后6项): {self.router[2].bias[-6:].tolist()}")
 
-        top_weights, top_indices = torch.topk(layer_probs, self.top_router, dim=-1)
+        layer_probs = F.softmax(logits, dim=-1)
+        layer_probs = layer_probs[0]  # [text_len, num_layers]
+        
+        # 投票: 聚合所有 token 的预测
+        aggregated_probs = layer_probs.mean(dim=0)  # [num_layers]
+        
+        top_weights, top_indices = torch.topk(aggregated_probs, self.top_router, dim=-1)
+
         top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
         
-        return top_indices, top_weights, layer_probs
+        return top_indices, top_weights, aggregated_probs
+
+class SimplifiedFeatureFusion(nn.Module):
+    def __init__(self, dim, num_layers=5):
+        super().__init__()
+        
+        # 每层特征先过一个小型adapter
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(dim) for _ in range(num_layers)
+        ])
+        
+        # 跨层融合使用简单MLP
+        self.fusion = nn.Sequential(
+            nn.Linear(dim * num_layers, dim * 2),
+            nn.GELU(),
+            nn.Linear(dim * 2, dim),
+            nn.LayerNorm(dim)
+        )
+        self._reset_parameters()
+        print(f"[Fusion]fusion[0].weight.shape: {self.fusion[0].weight.shape}")
+        print(f"[Fusion]fusion[2].weight.shape: {self.fusion[2].weight.shape}")
+    
+    def _reset_parameters(self):
+        for module in self.fusion.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+    
+    def forward(self, layer_features_list, weights):
+        # 1. 每层归一化后应用权重
+        weighted_feats = []
+        for feat, norm, w in zip(layer_features_list, self.layer_norms, weights):
+            weighted_feats.append(norm(feat) * w)
+        
+        # 2. 拼接后通过MLP融合
+        concat = torch.cat(weighted_feats, dim=-1)
+        fused = self.fusion(concat)
+        print(f"  [Fusion]fusion[0].weight.shape: {self.fusion[0].weight.shape}")
+        print(f"  [Fusion]fusion[2].weight.shape: {self.fusion[2].weight.shape}")
+        
+        return fused
 
 def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, 'mm_projector_type', 'linear')
@@ -269,8 +405,15 @@ def build_layer_router(config):
     num_layers = config.num_layers if hasattr(config, 'num_layers') else 24
     top_router = config.top_router if hasattr(config, 'top_router') else 5
     
-    print(f"  最终: dim={dim}, num_layers={num_layers}, top_router={top_router}")
-    print(f"  类型: dim={type(dim)}, num_layers={type(num_layers)}, top_router={type(top_router)}")
-    print("=" * 60)
+    # print(f"  最终: dim={dim}, num_layers={num_layers}, top_router={top_router}")
+    # print(f"  类型: dim={type(dim)}, num_layers={type(num_layers)}, top_router={type(top_router)}")
+    # print("=" * 60)
     
     return LayerSelectionRouter(dim=dim, num_layers=num_layers, top_router=top_router)
+
+
+def build_layer_fusion(config):
+    dim = config.dim if hasattr(config, 'dim') else 4096
+    num_layers = config.num_layers if hasattr(config, 'num_layers') else 5
+    
+    return SimplifiedFeatureFusion(dim=dim, num_layers=num_layers)

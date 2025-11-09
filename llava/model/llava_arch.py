@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from .multimodal_encoder.builder import build_vision_tower
-from .multimodal_projector.builder import build_vision_projector, build_cross_attn, build_layer_router
+from .multimodal_projector.builder import build_vision_projector, build_cross_attn, build_layer_router, build_layer_fusion
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -31,12 +31,14 @@ class LlavaMetaModel:
 
     def __init__(self, config):
         super(LlavaMetaModel, self).__init__(config)
-        # self.ca = build_cross_attn(config)
-        # self.layer_router = build_layer_router(config)
+        
         if hasattr(config, "mm_vision_tower"):
             print("==========================Building vision tower================")
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)
+            self.ca = build_cross_attn(config)
+            self.layer_fusion = build_layer_fusion(config)
+            self.layer_router = build_layer_router(config)
 
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
                 self.image_newline = nn.Parameter(
@@ -54,6 +56,9 @@ class LlavaMetaModel:
     
     def get_layer_router(self):
         return self.layer_router
+    
+    def get_layer_fusion(self):
+        return self.layer_fusion
 
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
@@ -95,6 +100,11 @@ class LlavaMetaModel:
             for p in self.layer_router.parameters():
                 p.requires_grad = True
 
+        if getattr(self, 'layer_fusion', None) is None:
+            self.layer_fusion = build_layer_fusion(self.config)
+            for p in self.layer_fusion.parameters():
+                p.requires_grad = True
+
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
             if 'unpad' in mm_patch_merge_type:
@@ -108,6 +118,7 @@ class LlavaMetaModel:
                 p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
+            
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
 
             def get_w(weights, keyword):
@@ -120,10 +131,11 @@ class LlavaMetaModel:
 
             if hasattr(self, 'layer_router'):
                 self.layer_router.load_state_dict(get_w(mm_projector_weights, 'layer_router'))
+
+            if hasattr(self, 'layer_fusion'):
+                self.layer_fusion.load_state_dict(get_w(mm_projector_weights, 'layer_fusion'))
         
         
-
-
 
 def unpad_image(tensor, original_size):
     """
@@ -170,6 +182,9 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_layer_router(self):
         return self.get_model().get_layer_router()
+    
+    def get_layer_fusion(self):
+        return self.get_model().get_layer_fusion()
 
 
     # def encode_images(self, images, text_token):
@@ -213,6 +228,8 @@ class LlavaMetaForCausalLM(ABC):
         if combined_text.dim() == 2:
             combined_text = combined_text.unsqueeze(0)
 
+        print("combined_text shape:", combined_text.shape)
+
         # 初始化最终输出
         batch_size, text_len, dim = combined_text.shape
         batch_size = image_features.shape[0]
@@ -227,17 +244,18 @@ class LlavaMetaForCausalLM(ABC):
         top_indices, top_weights, all_probs = self.get_model().layer_router(combined_text)
         
         # Use the most common selection or first sample's selection
-        selected_indices = top_indices[0]
-        selected_weights = top_weights[0]
-        print(f"Selected layers: {selected_indices.tolist()}")
-        print(f"Layer weights: {selected_weights.tolist()}")
+        # selected_indices = top_indices[0]
+        # selected_weights = top_weights[0]
+        print(f"Selected layers: {top_indices.tolist()}")
+        print(f"Layer weights: {top_weights.tolist()}")
         
-        for idx in range(len(selected_indices)):
+        layer_features_list = []
+        for idx in range(len(top_indices)):
         # 获取当前层特征 [batch, num_patches, dim]
             # layer_feat = image_forward_outs.hidden_states[i]
             # layer_feat = image_forward_outs.hidden_states[i].half()
-            layer_idx = selected_indices[idx].item()  # 转为整数用于索引
-            weight = selected_weights[idx]
+            layer_idx = top_indices[idx].item()  # 转为整数用于索引
+            weight = top_weights[idx]
 
             layer_feat = image_forward_outs.hidden_states[layer_idx][:, 1:].to(image_features.dtype)
             # print("layer_feat shape:", layer_feat.shape)
@@ -248,10 +266,11 @@ class LlavaMetaForCausalLM(ABC):
             attended = self.get_model().ca(combined_text, layer_features)
 
             # print("layer_feat type:", type(layer_feat))
-            combined_features += weight * attended
+            layer_features_list.append(attended)
             
             # print(f"Processed layer {idx}")
             # print("combined_features shape:", combined_features.shape)
+        combined_features = self.get_model().layer_fusion(layer_features_list, top_weights)
         return combined_features
 
 
